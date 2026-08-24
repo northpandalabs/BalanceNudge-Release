@@ -3,6 +3,17 @@ name: Auto Release
 on:
   push:
     branches: [ main ]
+    paths:
+      - 'Alpha/**'
+      - 'Beta/**'
+      - 'Release/**'
+      - 'release.json'
+
+# Cancel any in-progress run for the same branch so rapid commits don't race
+# to create or edit the same release tag simultaneously.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: write
@@ -17,6 +28,7 @@ jobs:
 
       - name: Resolve release stage and assets
         id: resolve
+        shell: bash
         run: |
           # Priority: Release > Beta > Alpha -- first folder that exists with a numeric build wins
           STAGE=""
@@ -44,35 +56,36 @@ jobs:
           VERSION=$(jq -r '.version' release.json)
           DESCRIPTION=$(jq -r '.description' release.json)
 
-          echo "stage=$STAGE"           >> "$GITHUB_OUTPUT"
-          echo "asset_dir=$ASSET_DIR"   >> "$GITHUB_OUTPUT"
-          echo "build=$BUILD"           >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION"       >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION"          >> "$GITHUB_OUTPUT"
+          echo "stage=$STAGE"         >> "$GITHUB_OUTPUT"
+          echo "asset_dir=$ASSET_DIR" >> "$GITHUB_OUTPUT"
+          echo "build=$BUILD"         >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION"     >> "$GITHUB_OUTPUT"
+          echo "tag=v$VERSION"        >> "$GITHUB_OUTPUT"
 
-          # Write description to file so special characters survive env handoff
-          printf '%s' "$DESCRIPTION" > /tmp/release_description.txt
+          # Use RUNNER_TEMP (guaranteed writable, cleaned up by runner) rather than /tmp
+          printf '%s' "$DESCRIPTION" > "$RUNNER_TEMP/release_description.txt"
 
           echo "Resolved: stage=$STAGE  build=$BUILD  version=$VERSION  assets=$ASSET_DIR"
 
       - name: Build release notes
         id: notes
+        shell: bash
         env:
           STAGE: ${{ steps.resolve.outputs.stage }}
           VERSION: ${{ steps.resolve.outputs.version }}
           BUILD: ${{ steps.resolve.outputs.build }}
         run: |
-          DESCRIPTION=$(cat /tmp/release_description.txt)
+          DESCRIPTION=$(cat "$RUNNER_TEMP/release_description.txt")
           {
             echo "**Stage:** $STAGE"
             echo "**Version:** $VERSION"
             echo "**Build:** $BUILD"
             echo ""
             echo "$DESCRIPTION"
-          } > /tmp/release_notes.txt
-          echo "Notes written."
+          } > "$RUNNER_TEMP/release_notes.txt"
 
       - name: Create or update GitHub release
+        shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.resolve.outputs.tag }}
@@ -83,24 +96,24 @@ jobs:
         run: |
           TITLE="BalanceNudge $VERSION (Build $BUILD)"
 
-          # Collect all files in the highest build folder
           mapfile -t ASSETS < <(find "$ASSET_DIR" -maxdepth 1 -type f)
 
           if [ ${#ASSETS[@]} -eq 0 ]; then
             echo "WARNING: No asset files found in $ASSET_DIR -- release will have no attachments."
           fi
 
-          PRERELEASE_FLAG=""
-          if [ "$STAGE" != "release" ]; then
-            PRERELEASE_FLAG="--prerelease"
+          # Use an array so empty flags never produce a bare empty-string argument
+          PRERELEASE_FLAGS=("--prerelease")
+          if [ "$STAGE" = "release" ]; then
+            PRERELEASE_FLAGS=("--no-prerelease")
           fi
 
           if gh release view "$TAG" > /dev/null 2>&1; then
             echo "Tag $TAG already exists -- updating release and re-uploading assets."
             gh release edit "$TAG" \
               --title "$TITLE" \
-              --notes-file /tmp/release_notes.txt \
-              $PRERELEASE_FLAG
+              --notes-file "$RUNNER_TEMP/release_notes.txt" \
+              "${PRERELEASE_FLAGS[@]}"
 
             if [ ${#ASSETS[@]} -gt 0 ]; then
               gh release upload "$TAG" "${ASSETS[@]}" --clobber
@@ -109,10 +122,9 @@ jobs:
             echo "Creating new release $TAG."
             gh release create "$TAG" \
               --title "$TITLE" \
-              --notes-file /tmp/release_notes.txt \
-              $PRERELEASE_FLAG \
+              --notes-file "$RUNNER_TEMP/release_notes.txt" \
+              "${PRERELEASE_FLAGS[@]}" \
               "${ASSETS[@]}"
           fi
 
-          echo ""
           echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/$TAG"
