@@ -3,11 +3,6 @@ name: Auto Release
 on:
   push:
     branches: [ main ]
-    paths:
-      - 'Alpha/**'
-      - 'Beta/**'
-      - 'Release/**'
-      - 'release.json'
 
 # Cancel any in-progress run for the same branch so rapid commits don't race
 # to create or edit the same release tag simultaneously.
@@ -25,6 +20,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Resolve release stage and assets
         id: resolve
@@ -62,13 +59,11 @@ jobs:
           echo "version=$VERSION"     >> "$GITHUB_OUTPUT"
           echo "tag=v$VERSION"        >> "$GITHUB_OUTPUT"
 
-          # Use RUNNER_TEMP (guaranteed writable, cleaned up by runner) rather than /tmp
           printf '%s' "$DESCRIPTION" > "$RUNNER_TEMP/release_description.txt"
 
           echo "Resolved: stage=$STAGE  build=$BUILD  version=$VERSION  assets=$ASSET_DIR"
 
       - name: Build release notes
-        id: notes
         shell: bash
         env:
           STAGE: ${{ steps.resolve.outputs.stage }}
@@ -85,6 +80,7 @@ jobs:
           } > "$RUNNER_TEMP/release_notes.txt"
 
       - name: Create or update GitHub release
+        id: publish
         shell: bash
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -102,7 +98,6 @@ jobs:
             echo "WARNING: No asset files found in $ASSET_DIR -- release will have no attachments."
           fi
 
-          # Use an array so empty flags never produce a bare empty-string argument
           PRERELEASE_FLAGS=("--prerelease")
           if [ "$STAGE" = "release" ]; then
             PRERELEASE_FLAGS=("--no-prerelease")
@@ -127,4 +122,27 @@ jobs:
               "${ASSETS[@]}"
           fi
 
-          echo "Release URL: https://github.com/${{ github.repository }}/releases/tag/$TAG"
+          RELEASE_URL="https://github.com/${{ github.repository }}/releases/tag/$TAG"
+          echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
+          echo "Release URL: $RELEASE_URL"
+
+      - name: Update release_page in release.json
+        shell: bash
+        env:
+          RELEASE_URL: ${{ steps.publish.outputs.release_url }}
+        run: |
+          CURRENT_URL=$(jq -r '.release_page' release.json)
+
+          if [ "$CURRENT_URL" = "$RELEASE_URL" ]; then
+            echo "release_page already correct, nothing to commit."
+            exit 0
+          fi
+
+          jq --arg url "$RELEASE_URL" '.release_page = $url' release.json > "$RUNNER_TEMP/release.json.tmp"
+          mv "$RUNNER_TEMP/release.json.tmp" release.json
+
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add release.json
+          git commit -m "chore: update release_page to $RELEASE_URL [skip ci]"
+          git push
