@@ -57,7 +57,7 @@ jobs:
           echo "asset_dir=$ASSET_DIR" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD"         >> "$GITHUB_OUTPUT"
           echo "version=$VERSION"     >> "$GITHUB_OUTPUT"
-          echo "tag=v$VERSION"        >> "$GITHUB_OUTPUT"
+          echo "tag=v$BUILD"          >> "$GITHUB_OUTPUT"
 
           printf '%s' "$DESCRIPTION" > "$RUNNER_TEMP/release_description.txt"
 
