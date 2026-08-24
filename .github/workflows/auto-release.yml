@@ -34,8 +34,8 @@ jobs:
 
           for CANDIDATE in Release Beta Alpha; do
             if [ -d "$CANDIDATE" ]; then
-              HIGHEST=$(find "$CANDIDATE" -maxdepth 1 -mindepth 1 -type d \
-                | grep -E '/[0-9]+$' | sort -t/ -k2 -V | tail -1)
+              HIGHEST=$(find "$CANDIDATE" -maxdepth 1 -mindepth 1 -type d 2>/dev/null \
+                | sort -V | tail -1)
               if [ -n "$HIGHEST" ]; then
                 STAGE=$(echo "$CANDIDATE" | tr '[:upper:]' '[:lower:]')
                 ASSET_DIR="$HIGHEST"
