@@ -27,7 +27,7 @@ jobs:
         id: resolve
         shell: bash
         run: |
-          # Priority: Release > Beta > Alpha -- first folder that exists with a numeric build wins
+          # Priority: Release > Beta > Alpha -- first folder that exists with a versioned build wins
           STAGE=""
           ASSET_DIR=""
           BUILD=""
@@ -46,35 +46,38 @@ jobs:
           done
 
           if [ -z "$STAGE" ]; then
-            echo "ERROR: No release stage folder (Alpha/Beta/Release) with a numeric build found."
+            echo "ERROR: No release stage folder (Alpha/Beta/Release) with a build subfolder found."
             exit 1
           fi
 
-          VERSION=$(jq -r '.version' release.json)
-          DESCRIPTION=$(jq -r '.description' release.json)
+          # desc.txt in the build folder overrides release.json description when present
+          if [ -f "$ASSET_DIR/desc.txt" ]; then
+            cp "$ASSET_DIR/desc.txt" "$RUNNER_TEMP/effective_desc.txt"
+            echo "has_desc_txt=true" >> "$GITHUB_OUTPUT"
+            echo "desc.txt found -- will update description in release.json"
+          else
+            jq -r '.description' release.json > "$RUNNER_TEMP/effective_desc.txt"
+            echo "has_desc_txt=false" >> "$GITHUB_OUTPUT"
+            echo "No desc.txt -- description left unchanged"
+          fi
 
           echo "stage=$STAGE"         >> "$GITHUB_OUTPUT"
           echo "asset_dir=$ASSET_DIR" >> "$GITHUB_OUTPUT"
           echo "build=$BUILD"         >> "$GITHUB_OUTPUT"
-          echo "version=$VERSION"     >> "$GITHUB_OUTPUT"
           echo "tag=v$BUILD"          >> "$GITHUB_OUTPUT"
 
-          printf '%s' "$DESCRIPTION" > "$RUNNER_TEMP/release_description.txt"
-
-          echo "Resolved: stage=$STAGE  build=$BUILD  version=$VERSION  assets=$ASSET_DIR"
+          echo "Resolved: stage=$STAGE  build=$BUILD  assets=$ASSET_DIR"
 
       - name: Build release notes
         shell: bash
         env:
           STAGE: ${{ steps.resolve.outputs.stage }}
-          VERSION: ${{ steps.resolve.outputs.version }}
           BUILD: ${{ steps.resolve.outputs.build }}
         run: |
-          DESCRIPTION=$(cat "$RUNNER_TEMP/release_description.txt")
+          DESCRIPTION=$(cat "$RUNNER_TEMP/effective_desc.txt")
           {
             echo "**Stage:** $STAGE"
-            echo "**Version:** $VERSION"
-            echo "**Build:** $BUILD"
+            echo "**Version:** $BUILD"
             echo ""
             echo "$DESCRIPTION"
           } > "$RUNNER_TEMP/release_notes.txt"
@@ -85,14 +88,14 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ steps.resolve.outputs.tag }}
-          VERSION: ${{ steps.resolve.outputs.version }}
           STAGE: ${{ steps.resolve.outputs.stage }}
           BUILD: ${{ steps.resolve.outputs.build }}
           ASSET_DIR: ${{ steps.resolve.outputs.asset_dir }}
         run: |
-          TITLE="BalanceNudge $VERSION (Build $BUILD)"
+          TITLE="BalanceNudge $BUILD ($STAGE)"
 
-          mapfile -t ASSETS < <(find "$ASSET_DIR" -maxdepth 1 -type f)
+          # Exclude desc.txt from uploaded assets -- it is metadata, not a download
+          mapfile -t ASSETS < <(find "$ASSET_DIR" -maxdepth 1 -type f ! -name "desc.txt")
 
           if [ ${#ASSETS[@]} -eq 0 ]; then
             echo "WARNING: No asset files found in $ASSET_DIR -- release will have no attachments."
@@ -104,7 +107,7 @@ jobs:
           fi
 
           if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "Tag $TAG already exists -- updating release and re-uploading assets."
+            echo "Tag $TAG exists -- updating release and re-uploading assets."
             gh release edit "$TAG" \
               --title "$TITLE" \
               --notes-file "$RUNNER_TEMP/release_notes.txt" \
@@ -126,23 +129,54 @@ jobs:
           echo "release_url=$RELEASE_URL" >> "$GITHUB_OUTPUT"
           echo "Release URL: $RELEASE_URL"
 
-      - name: Update release_page in release.json
+      - name: Update release.json
         shell: bash
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           RELEASE_URL: ${{ steps.publish.outputs.release_url }}
+          BUILD: ${{ steps.resolve.outputs.build }}
+          TAG: ${{ steps.resolve.outputs.tag }}
+          ASSET_DIR: ${{ steps.resolve.outputs.asset_dir }}
+          HAS_DESC_TXT: ${{ steps.resolve.outputs.has_desc_txt }}
+          REPO: ${{ github.repository }}
         run: |
-          CURRENT_URL=$(jq -r '.release_page' release.json)
+          # Always update version and release_page
+          UPDATED=$(jq \
+            --arg ver "$BUILD" \
+            --arg url "$RELEASE_URL" \
+            '.version = $ver | .release_page = $url' \
+            release.json)
 
-          if [ "$CURRENT_URL" = "$RELEASE_URL" ]; then
-            echo "release_page already correct, nothing to commit."
-            exit 0
+          # Update description only when desc.txt was present -- never touch it otherwise
+          if [ "$HAS_DESC_TXT" = "true" ]; then
+            DESC=$(cat "$RUNNER_TEMP/effective_desc.txt")
+            UPDATED=$(echo "$UPDATED" | jq --arg d "$DESC" '.description = $d')
           fi
 
-          jq --arg url "$RELEASE_URL" '.release_page = $url' release.json > "$RUNNER_TEMP/release.json.tmp"
-          mv "$RUNNER_TEMP/release.json.tmp" release.json
+          # Add or update download URLs only for platform files that actually exist in the build folder.
+          # Files not present are left alone -- unknown fields in release.json are never touched.
+          declare -A EXT_MAP=([exe]=download_win [dmg]=download_mac [deb]=download_linux)
+          for EXT in "${!EXT_MAP[@]}"; do
+            FILE=$(find "$ASSET_DIR" -maxdepth 1 -name "*.$EXT" | head -1)
+            if [ -n "$FILE" ]; then
+              FNAME=$(basename "$FILE")
+              DL_URL="https://github.com/$REPO/releases/download/$TAG/$FNAME"
+              KEY="${EXT_MAP[$EXT]}"
+              UPDATED=$(echo "$UPDATED" | jq --arg k "$KEY" --arg v "$DL_URL" '.[$k] = $v')
+              echo "Set $KEY -> $DL_URL"
+            fi
+          done
+
+          echo "$UPDATED" > release.json
+
+          # Only commit when something actually changed
+          if git diff --quiet -- release.json; then
+            echo "release.json unchanged, nothing to commit."
+            exit 0
+          fi
 
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git add release.json
-          git commit -m "chore: update release_page to $RELEASE_URL [skip ci]"
+          git commit -m "chore: update release.json for $TAG [skip ci]"
           git push
