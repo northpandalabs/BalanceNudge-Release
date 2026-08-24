@@ -1,5 +1,6 @@
 {
-  "version": "0.1.0-a13",
+  "version": "0.1.1a1",
   "release_page": "https://github.com/northpandalabs/BalanceNudge-Release/releases/tag/v0.1.1a1",
-  "description": "Initial alpha release -- encrypted local database, manual expense entry, AI receipt parser, Excel import, and folder-based sync."
+  "description": "This is an Update to Fixing the system",
+  "download_win": "https://github.com/northpandalabs/BalanceNudge-Release/releases/download/v0.1.1a1/BalanceNudge-dev-windows-setup.exe"
 }
